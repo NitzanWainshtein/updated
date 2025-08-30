@@ -7,12 +7,13 @@
 #include <queue>
 #include <functional>
 #include <atomic>
+#include <string>
 
 class ActiveObject {
 private:
     std::thread workerThread;
     std::queue<std::function<void()>> taskQueue;
-    std::mutex queueMutex;
+    mutable std::mutex queueMutex;
     std::condition_variable condition;
     std::atomic<bool> running;
     std::atomic<int> processedTasks;
@@ -25,7 +26,7 @@ public:
     void enqueue(std::function<void()> task);
     void start();
     void stop();
-    int getProcessedTaskCount() const { return processedTasks; }
+    int getProcessedTaskCount() const { return processedTasks.load(); }
     int getQueueSize() const;
     const std::string& getName() const { return objectName; }
     

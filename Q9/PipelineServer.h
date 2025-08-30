@@ -5,9 +5,11 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <chrono>
 #include "ActiveObject.h"
 #include "Graph.h"
 #include "AlgorithmFactory.h"
+#include "BaseAlgorithm.h"
 
 struct PipelineRequest {
     int clientSocket;
@@ -25,6 +27,14 @@ struct ProcessedGraph {
     int clientId;
     Graph graph;
     std::chrono::high_resolution_clock::time_point startTime;
+    
+    // Default constructor
+    ProcessedGraph() : clientSocket(-1), clientId(-1), graph(1, false) {}
+    
+    // Constructor with parameters
+    ProcessedGraph(int socket, int id, const Graph& g, 
+                   const std::chrono::high_resolution_clock::time_point& time)
+        : clientSocket(socket), clientId(id), graph(g), startTime(time) {}
 };
 
 struct AlgorithmResults {
@@ -36,6 +46,14 @@ struct AlgorithmResults {
     AlgorithmResult mst;
     AlgorithmResult hamilton;
     std::chrono::high_resolution_clock::time_point startTime;
+    
+    // Default constructor
+    AlgorithmResults() : clientSocket(-1), clientId(-1), graph(1, false) {}
+    
+    // Constructor with parameters
+    AlgorithmResults(int socket, int id, const Graph& g,
+                     const std::chrono::high_resolution_clock::time_point& time)
+        : clientSocket(socket), clientId(id), graph(g), startTime(time) {}
 };
 
 class PipelineServer {
@@ -62,7 +80,7 @@ public:
     
     void start();
     void stop();
-    bool isRunning() const { return running; }
+    bool isRunning() const { return running.load(); }
     
     // Pipeline statistics
     struct PipelineStats {

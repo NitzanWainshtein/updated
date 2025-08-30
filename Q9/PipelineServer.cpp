@@ -3,9 +3,13 @@
 #include <sstream>
 #include <cstring>
 #include <chrono>
+#include <thread>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <ctime>
+#include <memory>
+#include <stdexcept>
 
 PipelineServer::PipelineServer(int serverPort) 
     : port(serverPort), serverSocket(-1), running(false), 
@@ -75,19 +79,19 @@ void PipelineServer::stop() {
 }
 
 void PipelineServer::acceptorThread() {
-    while (running) {
+    while (running.load()) {
         struct sockaddr_in clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
         
         int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
         if (clientSocket < 0) {
-            if (running) {
+            if (running.load()) {
                 std::cerr << "Accept failed" << std::endl;
             }
             continue;
         }
         
-        int clientId = ++totalConnections;
+        int clientId = totalConnections.fetch_add(1) + 1;
         logRequest(clientId, "Connection accepted - entering pipeline");
         
         std::thread([this, clientSocket, clientId]() {
@@ -105,7 +109,7 @@ void PipelineServer::handleClientConnection(int clientSocket, int clientId) {
     sendResponse(clientSocket, welcome);
     
     char buffer[1024];
-    while (running) {
+    while (running.load()) {
         memset(buffer, 0, sizeof(buffer));
         int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
         
@@ -138,7 +142,7 @@ void PipelineServer::handleClientConnection(int clientSocket, int clientId) {
         } else if (!input.empty()) {
             // Create request and send to pipeline Stage 1
             auto request = std::make_shared<PipelineRequest>(clientSocket, clientId, input);
-            totalRequests++;
+            totalRequests.fetch_add(1);
             
             logRequest(clientId, "Request entering Stage 1 (RequestReceiver)");
             requestReceiver->enqueue([this, request]() {
@@ -162,18 +166,19 @@ void PipelineServer::stage1_receiveRequest(std::shared_ptr<PipelineRequest> requ
         logRequest(request->clientId, "Stage 1 -> Stage 2");
         
         // Pass to Stage 2
-        auto processedGraph = std::make_shared<ProcessedGraph>();
-        processedGraph->clientSocket = request->clientSocket;
-        processedGraph->clientId = request->clientId;
-        processedGraph->graph = graph;
-        processedGraph->startTime = request->startTime;
+        auto processedGraph = std::make_shared<ProcessedGraph>(
+            request->clientSocket, 
+            request->clientId, 
+            graph, 
+            request->startTime
+        );
         
         graphProcessor->enqueue([this, processedGraph]() {
             stage2_processGraph(processedGraph);
         });
         
     } catch (const std::exception& e) {
-        pipelineErrors++;
+        pipelineErrors.fetch_add(1);
         std::string errorResponse = formatError(e.what(), request->clientId) + "\n> ";
         sendResponse(request->clientSocket, errorResponse);
         logRequest(request->clientId, "Stage 1 error: " + std::string(e.what()));
@@ -193,18 +198,19 @@ void PipelineServer::stage2_processGraph(std::shared_ptr<ProcessedGraph> graph) 
         logRequest(graph->clientId, "Stage 2 -> Stage 3");
         
         // Pass to Stage 3 - prepare algorithm results structure
-        auto results = std::make_shared<AlgorithmResults>();
-        results->clientSocket = graph->clientSocket;
-        results->clientId = graph->clientId;
-        results->graph = graph->graph;
-        results->startTime = graph->startTime;
+        auto results = std::make_shared<AlgorithmResults>(
+            graph->clientSocket,
+            graph->clientId,
+            graph->graph,
+            graph->startTime
+        );
         
         algorithmExecutor->enqueue([this, results]() {
             stage3_executeAlgorithms(results);
         });
         
     } catch (const std::exception& e) {
-        pipelineErrors++;
+        pipelineErrors.fetch_add(1);
         std::string errorResponse = formatError(e.what(), graph->clientId) + "\n> ";
         sendResponse(graph->clientSocket, errorResponse);
         logRequest(graph->clientId, "Stage 2 error: " + std::string(e.what()));
@@ -237,7 +243,7 @@ void PipelineServer::stage3_executeAlgorithms(std::shared_ptr<AlgorithmResults> 
         });
         
     } catch (const std::exception& e) {
-        pipelineErrors++;
+        pipelineErrors.fetch_add(1);
         std::string errorResponse = formatError(e.what(), results->clientId) + "\n> ";
         sendResponse(results->clientSocket, errorResponse);
         logRequest(results->clientId, "Stage 3 error: " + std::string(e.what()));
@@ -258,7 +264,7 @@ void PipelineServer::stage4_formatResponse(std::shared_ptr<AlgorithmResults> res
         logRequest(results->clientId, "Pipeline completed in " + std::to_string(totalTime.count()) + "us");
         
     } catch (const std::exception& e) {
-        pipelineErrors++;
+        pipelineErrors.fetch_add(1);
         std::string errorResponse = formatError(e.what(), results->clientId) + "\n> ";
         sendResponse(results->clientSocket, errorResponse);
         logRequest(results->clientId, "Stage 4 error: " + std::string(e.what()));
@@ -333,8 +339,8 @@ std::string PipelineServer::formatPipelineResponse(const AlgorithmResults& resul
 
 PipelineServer::PipelineStats PipelineServer::getStats() {
     PipelineStats stats;
-    stats.totalRequests = totalRequests;
-    stats.totalErrors = pipelineErrors;
+    stats.totalRequests = totalRequests.load();
+    stats.totalErrors = pipelineErrors.load();
     stats.stage1Processed = requestReceiver->getProcessedTaskCount();
     stats.stage2Processed = graphProcessor->getProcessedTaskCount();
     stats.stage3Processed = algorithmExecutor->getProcessedTaskCount();
